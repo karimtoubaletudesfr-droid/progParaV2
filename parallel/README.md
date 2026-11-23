@@ -15,7 +15,7 @@ g++ -std=c++11 -Wall -Wextra -pedantic -Iinclude src/main.cpp src/monde.cpp src/
 Depuis `parallel` :
 
 ```bash
-mpic++ -std=c++11 -Wall -Wextra -pedantic -Iinclude -Irepartion_de_base/round_robin src/mainPara.cpp src/ile.cpp src/ile_portable.cpp src/habitant.cpp repartion_de_base/round_robin/round_robin.cpp -o monde_mpi
+mpic++ -std=c++11 -Wall -Wextra -pedantic -Iinclude -Irepartion_de_base/round_robin src/mainPara.cpp src/ile.cpp src/ile_portable.cpp src/habitant.cpp src/fonction_simulation.cpp repartion_de_base/round_robin/round_robin.cpp -o monde_mpi
 mpirun -np 3 ./monde_mpi ../fichierMondes/monde1.txt 1 10 42
 ```
 

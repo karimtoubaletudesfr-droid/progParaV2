@@ -10,6 +10,8 @@
 #include "pseudo_monde.hpp"
 #include "round_robin.hpp"
 #include "pont.hpp"
+#include "voisin.hpp"
+#include "ghost.hpp"
 
 const int NUMBER_OF_ARGS_IS_NOT_CORRECT = 1;
 const int ROOT_RANK_NOT_AVAILABLE = 2;
@@ -144,12 +146,12 @@ int main(int argc, char** argv) {
         }
 
         for (int i = 0; i < nb_ponts; ++i) {
-            int rang_a = rang_par_ile[ponts[i].ile_a];
-            int rang_b = rang_par_ile[ponts[i].ile_b];
+            ponts[i].rang_a = rang_par_ile[ponts[i].ile_a];
+            ponts[i].rang_b = rang_par_ile[ponts[i].ile_b];
 
-            ++nb_ponts_par_rang[rang_a];
-            if (rang_b != rang_a) {
-                ++nb_ponts_par_rang[rang_b];
+            ++nb_ponts_par_rang[ponts[i].rang_a];
+            if (ponts[i].rang_b != ponts[i].rang_a) {
+                ++nb_ponts_par_rang[ponts[i].rang_b];
             }
         }
 
@@ -168,8 +170,8 @@ int main(int argc, char** argv) {
         }
 
         for (int i = 0; i < nb_ponts; ++i) {
-            int rang_a = rang_par_ile[ponts[i].ile_a];
-            int rang_b = rang_par_ile[ponts[i].ile_b];
+            int rang_a = ponts[i].rang_a;
+            int rang_b = ponts[i].rang_b;
 
             envoi_ponts[prochaine_case[rang_a]] = ponts[i];
             ++prochaine_case[rang_a];
@@ -267,11 +269,95 @@ int main(int argc, char** argv) {
     }
     std::free(mes_descriptions);
 
+    std::unordered_map<int, int> indice_par_ile;
+    for (int i = 0; i < monde_local.nb_iles; ++i) {
+        indice_par_ile[monde_local.liste_iles[i]->num] = i;
+    }
+
+    liste_voisins* listes = (liste_voisins*) std::calloc(
+        monde_local.nb_iles, sizeof(liste_voisins));
+
+    if (monde_local.nb_iles > 0 && listes == nullptr) {
+        MPI_Abort(MPI_COMM_WORLD, MEMORY_ALLOCATION_ERROR);
+    }
+
+    for (int i = 0; i < nb_ponts_locaux; ++i) {
+        const pont& p = mes_ponts[i];
+
+        if (p.rang_a == rank) {
+            ++listes[indice_par_ile[p.ile_a]].nombre;
+        }
+        if (p.rang_b == rank && p.ile_b != p.ile_a) {
+            ++listes[indice_par_ile[p.ile_b]].nombre;
+        }
+    }
+
+    for (int i = 0; i < monde_local.nb_iles; ++i) {
+        int nombre = listes[i].nombre;
+        listes[i].voisins = (voisin*) std::malloc(nombre * sizeof(voisin));
+        if (nombre > 0 && listes[i].voisins == nullptr) {
+            MPI_Abort(MPI_COMM_WORLD, MEMORY_ALLOCATION_ERROR);
+        }
+        listes[i].nombre = 0;
+    }
+
+    for (int i = 0; i < nb_ponts_locaux; ++i) {
+        const pont& p = mes_ponts[i];
+
+        if (p.rang_a == rank) {
+            liste_voisins& liste = listes[indice_par_ile[p.ile_a]];
+            liste.voisins[liste.nombre++] = {p.ile_b, p.rang_b};
+        }
+        if (p.rang_b == rank && p.ile_b != p.ile_a) {
+            liste_voisins& liste = listes[indice_par_ile[p.ile_b]];
+            liste.voisins[liste.nombre++] = {p.ile_a, p.rang_a};
+        }
+    }
+
+    int capacite_ghosts = 0;
+    for (int i = 0; i < monde_local.nb_iles; ++i) {
+        for (int j = 0; j < listes[i].nombre; ++j) {
+            if (listes[i].voisins[j].rang != rank) {
+                ++capacite_ghosts;
+            }
+        }
+    }
+
+    ghost* ghosts = (ghost*) std::malloc(capacite_ghosts * sizeof(ghost));
+    if (capacite_ghosts > 0 && ghosts == nullptr) {
+        std::cerr << "Impossible d'allouer les ghosts du rang " << rank << '\n';
+        MPI_Abort(MPI_COMM_WORLD, MEMORY_ALLOCATION_ERROR);
+    }
+
+    int nb_ghosts = 0;
+    std::unordered_map<int, int> indice_par_ghost;
+
+    for (int i = 0; i < monde_local.nb_iles; ++i) {
+        for (int j = 0; j < listes[i].nombre; ++j) {
+            const voisin& v = listes[i].voisins[j];
+
+            if (v.rang == rank) {
+                continue;
+            }
+
+            if (indice_par_ghost.emplace(v.num, nb_ghosts).second) {
+                ghosts[nb_ghosts] = {v.num, v.rang, 0.0f, 0.0f};
+                ++nb_ghosts;
+            }
+        }
+    }
+
     for (int i = 0; i < monde_local.nb_iles; ++i) {
         liberer_ile(monde_local.liste_iles[i]);
     }
     std::free(monde_local.liste_iles);
     std::free(mes_ponts);
+
+    for (int i = 0; i < monde_local.nb_iles; ++i) {
+        std::free(listes[i].voisins);
+    }
+    std::free(listes);
+    std::free(ghosts);
 
     MPI_Finalize();
     return EXIT_SUCCESS;
