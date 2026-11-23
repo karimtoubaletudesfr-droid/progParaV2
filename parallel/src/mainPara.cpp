@@ -5,7 +5,6 @@
 #include <fstream>
 #include <iostream>
 #include <unordered_map>
-#include <vector>
 
 #include "ile_portable.hpp"
 #include "pseudo_monde.hpp"
@@ -57,6 +56,9 @@ int main(int argc, char** argv) {
 
     int nb_ponts = 0;
     pont* ponts = nullptr;
+    pont* envoi_ponts = nullptr;
+    int* tailles_ponts = nullptr;
+    int* deplacements_ponts = nullptr;
 
 
     if(rank == root ){
@@ -131,7 +133,16 @@ int main(int argc, char** argv) {
             entree >> ponts[i].ile_a >> ponts[i].ile_b;
         }
 
-        std::vector<int> nb_ponts_par_rang(nprocs, 0);
+        int* nb_ponts_par_rang = (int*) std::calloc(nprocs, sizeof(int));
+        int* prochaine_case = (int*) std::malloc(nprocs * sizeof(int));
+        tailles_ponts = (int*) std::malloc(nprocs * sizeof(int));
+        deplacements_ponts = (int*) std::malloc(nprocs * sizeof(int));
+
+        if (!nb_ponts_par_rang || !prochaine_case || !tailles_ponts || !deplacements_ponts) {
+            std::cerr << "Impossible d'allouer les tableaux pour les ponts.\n";
+            MPI_Abort(MPI_COMM_WORLD, MEMORY_ALLOCATION_ERROR);
+        }
+
         for (int i = 0; i < nb_ponts; ++i) {
             int rang_a = rang_par_ile[ponts[i].ile_a];
             int rang_b = rang_par_ile[ponts[i].ile_b];
@@ -141,6 +152,36 @@ int main(int argc, char** argv) {
                 ++nb_ponts_par_rang[rang_b];
             }
         }
+
+        int position_pont = 0;
+        for (int p = 0; p < nprocs; ++p) {
+            prochaine_case[p] = position_pont;
+            deplacements_ponts[p] = position_pont * sizeof(pont);
+            tailles_ponts[p] = nb_ponts_par_rang[p] * sizeof(pont);
+            position_pont += nb_ponts_par_rang[p];
+        }
+
+        envoi_ponts = (pont*) std::malloc(position_pont * sizeof(pont));
+        if (position_pont > 0 && !envoi_ponts) {
+            std::cerr << "Impossible d'allouer le tampon d'envoi des ponts.\n";
+            MPI_Abort(MPI_COMM_WORLD, MEMORY_ALLOCATION_ERROR);
+        }
+
+        for (int i = 0; i < nb_ponts; ++i) {
+            int rang_a = rang_par_ile[ponts[i].ile_a];
+            int rang_b = rang_par_ile[ponts[i].ile_b];
+
+            envoi_ponts[prochaine_case[rang_a]] = ponts[i];
+            ++prochaine_case[rang_a];
+
+            if (rang_b != rang_a) {
+                envoi_ponts[prochaine_case[rang_b]] = ponts[i];
+                ++prochaine_case[rang_b];
+            }
+        }
+
+        std::free(nb_ponts_par_rang);
+        std::free(prochaine_case);
         if(argc==5){
             seed_globale=(unsigned)atoi(argv[4]);
         }else{
@@ -184,12 +225,34 @@ int main(int argc, char** argv) {
     MPI_BYTE,
     root,
     MPI_COMM_WORLD
-);
+    );
+
+    int taille_ponts_locale;
+    MPI_Scatter(tailles_ponts, 1, MPI_INT,
+                &taille_ponts_locale, 1, MPI_INT,
+                root, MPI_COMM_WORLD);
+
+    pont* mes_ponts = (pont*) std::malloc(taille_ponts_locale);
+    // Un rang sans pont peut recevoir nullptr de malloc(0).
+    if (taille_ponts_locale > 0 && mes_ponts == nullptr) {
+        std::cerr << "Impossible d'allouer les ponts du rang " << rank << '\n';
+        MPI_Abort(MPI_COMM_WORLD, MEMORY_ALLOCATION_ERROR);
+    }
+
+    MPI_Scatterv(envoi_ponts, tailles_ponts, deplacements_ponts, MPI_BYTE,
+                 mes_ponts, taille_ponts_locale, MPI_BYTE,
+                 root, MPI_COMM_WORLD);
+
+    int nb_ponts_locaux = taille_ponts_locale / sizeof(pont);
+    std::cout << "Rang " << rank << " : " << nb_ponts_locaux << " ponts\n";
 
     std::free(envoi);
     std::free(tailles);
     std::free(deplacement);
     std::free(ponts);
+    std::free(envoi_ponts);
+    std::free(tailles_ponts);
+    std::free(deplacements_ponts);
 
     pseudoMonde monde_local = {};
     monde_local.nb_iles = taille_local / sizeof(ilePortable);
@@ -208,6 +271,7 @@ int main(int argc, char** argv) {
         liberer_ile(monde_local.liste_iles[i]);
     }
     std::free(monde_local.liste_iles);
+    std::free(mes_ponts);
 
     MPI_Finalize();
     return EXIT_SUCCESS;

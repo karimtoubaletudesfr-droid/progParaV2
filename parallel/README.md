@@ -19,7 +19,11 @@ mpic++ -std=c++11 -Wall -Wextra -pedantic -Iinclude -Irepartion_de_base/round_ro
 mpirun -np 3 ./monde_mpi ../fichierMondes/monde1.txt 1 10 42
 ```
 
-Cet exemple utilise le rang 1 comme racine. La version actuelle répartit les descriptions des îles et crée les habitants localement. La durée est validée au lancement pour la future boucle de simulation.
+- Le root lit le fichier et réparti les îles entre les processus en round robin. Il met les descriptions dans `envoi`, avec un bloc par rang.
+- Pour les ponts, le root retrouve le rang des deux îles reliées. Si elles sont sur deux rangs différents, le pont est mis dans les deux blocs de `envoi_ponts`.
+- Les tableaux de tailles disent combien d’octets chaque rang reçoit. Les déplacements disent ou commence son bloc. `prochaine_case` indique la prochaine place libre quand on range les ponts.
+- `MPI_Scatter` envoie d’abord les tailles. Comme ça chaque rang sait combien de mémoire allouer. Ensuite `MPI_Scatterv` remplit `mes_descriptions` et `mes_ponts`.
+- Chaque rang crée les habitants de ses propres îles. Les tableaux sont alloués avec `malloc` ou `calloc`, puis libérés avec `free` quand on en a plus besoin.
 
 ## Libération de la mémoire
 
