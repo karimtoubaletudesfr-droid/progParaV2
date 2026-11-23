@@ -1,14 +1,16 @@
-#define OMPI_SKIP_MPICXX 1
 #include <mpi.h>
 
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
 #include <iostream>
+#include <unordered_map>
+#include <vector>
 
 #include "ile_portable.hpp"
 #include "pseudo_monde.hpp"
 #include "round_robin.hpp"
+#include "pont.hpp"
 
 const int NUMBER_OF_ARGS_IS_NOT_CORRECT = 1;
 const int ROOT_RANK_NOT_AVAILABLE = 2;
@@ -52,6 +54,10 @@ int main(int argc, char** argv) {
     ilePortable* envoi = nullptr;
     int * tailles = nullptr;
     int* deplacement = nullptr;
+
+    int nb_ponts = 0;
+    pont* ponts = nullptr;
+
 
     if(rank == root ){
          int nb_iles;
@@ -106,10 +112,34 @@ int main(int argc, char** argv) {
         }
 
 
+        std::unordered_map<int, int> rang_par_ile;
+        rang_par_ile.reserve(nb_iles);
         for(int i = 0; i<nb_iles; i++){
             int destination= rang_round_robin(i,nprocs);
             int indice= (deplacement[destination]/sizeof(ilePortable))+i/nprocs;
             envoi[indice] = creer_ile_portable(entree);
+            rang_par_ile[envoi[indice].num] = destination;
+        }
+        entree >> nb_ponts;
+        ponts = (pont*) std::malloc(nb_ponts * sizeof(pont));
+
+        if (nb_ponts > 0 && ponts == nullptr) {
+            std::cerr << "Impossible d'allouer les ponts.\n";
+            MPI_Abort(MPI_COMM_WORLD, MEMORY_ALLOCATION_ERROR);
+        }
+        for (int i = 0; i < nb_ponts; ++i) {
+            entree >> ponts[i].ile_a >> ponts[i].ile_b;
+        }
+
+        std::vector<int> nb_ponts_par_rang(nprocs, 0);
+        for (int i = 0; i < nb_ponts; ++i) {
+            int rang_a = rang_par_ile[ponts[i].ile_a];
+            int rang_b = rang_par_ile[ponts[i].ile_b];
+
+            ++nb_ponts_par_rang[rang_a];
+            if (rang_b != rang_a) {
+                ++nb_ponts_par_rang[rang_b];
+            }
         }
         if(argc==5){
             seed_globale=(unsigned)atoi(argv[4]);
@@ -159,6 +189,7 @@ int main(int argc, char** argv) {
     std::free(envoi);
     std::free(tailles);
     std::free(deplacement);
+    std::free(ponts);
 
     pseudoMonde monde_local = {};
     monde_local.nb_iles = taille_local / sizeof(ilePortable);
