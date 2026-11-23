@@ -2,15 +2,20 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <iostream>
 
-struct habitant* creation_habitant(char* nom, int suffixe) {
+habitant* creation_habitant(const char* nom, int suffixe, std::mt19937* generateur) {
     struct habitant* h = (struct habitant*) malloc(sizeof(struct habitant));
-    h->age = rand()%50;
-    sprintf(h->nom, "%d", suffixe);
-    strcat(h->nom,nom);
-    h->revenu = revenu_min + ((float)rand()/(float)RAND_MAX)*(float)(revenu_max-revenu_min);
+    std::snprintf(h->nom, sizeof(h->nom), "%d%s", suffixe, nom);
+    if (generateur) {
+        std::uniform_int_distribution<int> age(0, 49);
+        std::uniform_real_distribution<float> revenu(revenu_min, revenu_max);
+        h->age = age(*generateur);
+        h->revenu = h->age < 18 ? 0.0f : revenu(*generateur);
+    } else {
+        h->age = rand()%50;
+        h->revenu = revenu_min + ((float)rand()/(float)RAND_MAX)*(float)(revenu_max-revenu_min);
+    }
     return h;
 }
 

@@ -6,9 +6,20 @@ Depuis la racine du projet, avec `g++` :
 
 ```bash
 cd parallel
-g++ -std=c++11 -Wall -Wextra -pedantic -Iinclude src/*.cpp -o simulation
+g++ -std=c++11 -Wall -Wextra -pedantic -Iinclude src/main.cpp src/monde.cpp src/ile.cpp src/habitant.cpp -o simulation
 ./simulation
 ```
+
+### Démarrage MPI
+
+Depuis `parallel` :
+
+```bash
+mpic++ -std=c++11 -Wall -Wextra -pedantic -Iinclude -Irepartion_de_base/round_robin src/mainPara.cpp src/ile.cpp src/ile_portable.cpp src/habitant.cpp repartion_de_base/round_robin/round_robin.cpp -o monde_mpi
+mpirun -np 3 ./monde_mpi ../fichierMondes/monde1.txt 1 10 42
+```
+
+Cet exemple utilise le rang 1 comme racine. La version actuelle répartit les descriptions des îles et crée les habitants localement. La durée est validée au lancement pour la future boucle de simulation.
 
 ## Libération de la mémoire
 
