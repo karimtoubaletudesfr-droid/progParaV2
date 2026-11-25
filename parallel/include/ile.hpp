@@ -1,7 +1,7 @@
 #ifndef ILE_HPP
 #define ILE_HPP
 
-#include <iosfwd>
+#include <iostream>
 #include <random>
 
 #include"ile_portable.hpp"
@@ -16,6 +16,7 @@ struct ile {
     int nb_hab;
     struct habitant** liste_hab;
     float gini;
+    float revenu_median;
     int surface;
     float inflation;
 };
@@ -23,7 +24,8 @@ struct ile {
 ile* creer_ile(std::istream& fichier);
 ile* creer_ile(int num, const char* nom, int nb_hab, float inflation,
                std::mt19937* generateur = nullptr);
-ile* convertir_ile(const ilePortable* description, float inflation, unsigned int seed_globale);
+ile* convertir_ile(const ilePortable* description, float inflation,
+                   std::mt19937& generateur);
 void affichage_ile(struct ile* ile);
 void liberer_ile(ile* une_ile);
 

@@ -28,10 +28,9 @@ ile* creer_ile(int num, const char* nom, int nb_hab, float inflation,
     return nouvelle_ile;
 }
 
-ile* convertir_ile(const ilePortable* description, float inflation, unsigned int seed_globale) {
-    unsigned int num = description->num;
-    std::seed_seq graines{seed_globale, num};
-    std::mt19937 generateur(graines);
+ile* convertir_ile(const ilePortable* description, float inflation,
+                   std::mt19937& generateur) {
+    // Construire la population sur le rang qui a reçu la description.
     return creer_ile(description->num, description->nom, description->nb_hab,
                      inflation, &generateur);
 }

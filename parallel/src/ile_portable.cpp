@@ -10,6 +10,7 @@ ilePortable creer_ile_portable(std::istream& fichier) {
 
     fichier >> num >> nom >> nb_hab;
 
+    // Le rang propriétaire créera ses habitants à partir de cette description.
     ilePortable nouvelle_ile = {};
     nouvelle_ile.num = num;
     std::strcpy(nouvelle_ile.nom, nom);
