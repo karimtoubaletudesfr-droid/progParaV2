@@ -1,10 +1,10 @@
 # Version dans `parallel`
 
-Notes internes pour s'y retrouver dans le code et préparer les prochains essais.
+Documentation technique de la simulation et des benchmarks.
 
 ## Compilation et exécution
 
-Depuis la racine du projet, avec `g++` :
+Depuis la racine du projet, compiler et lancer la version séquentielle avec `g++`.
 
 ```bash
 cd parallel
@@ -14,7 +14,7 @@ g++ -std=c++11 -Wall -Wextra -pedantic -Iinclude src/main.cpp src/monde.cpp src/
 
 ### Démarrage MPI
 
-Depuis `parallel` :
+Depuis `parallel/`, compiler et lancer la version MPI.
 
 ```bash
 mpic++ -std=c++11 -Wall -Wextra -pedantic -Iinclude -Irepartion_de_base/round_robin src/mainPara.cpp src/ile.cpp src/ile_portable.cpp src/habitant.cpp src/fonction_simulation.cpp repartion_de_base/round_robin/round_robin.cpp -o monde_mpi
@@ -22,7 +22,7 @@ mkdir -p LOGS
 mpirun -np 3 ./monde_mpi ../fichierMondes/monde1.txt 1 10 42
 ```
 
-Les arguments de `monde_mpi` sont le fichier du monde, le rang root, le nombre d'années et la graine facultative. Avec une graine fixée, une île démarre avec son propre générateur, initialisé avec la graine globale plus le numéro de l'île.
+Les arguments de `monde_mpi` sont le chemin du monde, le rang root, le nombre d'années et la graine facultative. Le rang root est compris entre 0 et le nombre de processus moins un.
 
 Le programme écrit ses fichiers dans `LOGS`, dans le répertoire depuis lequel on le lance.
 
@@ -39,8 +39,6 @@ Les quinze fichiers sont dans [`monde/`](../monde/). Pour un niveau donné, les 
 | extreme | 8 192 | 6 291 456 | [10 240](../monde/sparse/extreme.txt) | [49 152](../monde/balanced/extreme.txt) | [262 144](../monde/dense/extreme.txt) |
 
 Les fichiers de monde `.txt` ont été générés par IA. Ils suivent le format de `monde1.txt`, avec le nombre d'îles, les lignes `numéro nom population`, le nombre de ponts, puis les paires de numéros d'îles.
-
-Sur la machine de développement, un i5‑13420H à 8 cœurs physiques, il restait environ 9 Gio de mémoire disponible au moment du contrôle. Avec une compilation `-O2`, une graine de simulation de 42 et le monde `dense/extreme`, un essai de 10 ans sur 8 rangs a pris environ 8,1 s au chrono du programme. Le plus gros pic mémoire d'un rang était de 128 Mio et la somme des pics RSS individuels était de 796 Mio. Sur 1 rang pendant 1 an, le pic était de 611 Mio. La somme des pics donne un repère conservateur, puisque les rangs peuvent atteindre leur pic à des instants différents. Le fichier `LOGS/LOGS.TXT` occupe environ 151 Mio pour ce monde.
 
 Exemple depuis `parallel/`, avec le dossier `LOGS` déjà présent.
 
@@ -60,9 +58,7 @@ Le script crée `LOGS` si besoin et compile une fois le binaire MPI `benchmark` 
 
 Les réglages se modifient en haut du script. La configuration actuelle utilise `MAXnprocs=8`, `ANNEES=20` et `GRAINE=42` pour la simulation. Cela donne 120 lancements pour les 15 mondes.
 
-- `LOGS/resultat.txt` conserve les tableaux des benchmarks successifs. Le script affiche aussi chaque ligne dans le terminal, avec le monde, le nombre de processus, le temps en secondes et le nombre d'itérations. Une ligne `==================` clôt chaque benchmark terminé.
-- `LOGS/STATS.TXT` conserve les mesures brutes du simulateur, dont le script lit la dernière ligne après chaque lancement.
-- `LOGS/LOGS.TXT` et `LOGS/resKmeans` contiennent respectivement la répartition initiale et les enquêtes K-means du dernier lancement.
+Après chaque lancement, le script lit le temps dans la dernière ligne de `LOGS/STATS.TXT`, puis affiche et ajoute la ligne correspondante à `LOGS/resultat.txt`. Les formats sont détaillés dans [Fichiers de sortie](#fichiers-de-sortie).
 
 ## Ordre d'exécution MPI
 
@@ -72,6 +68,41 @@ Les réglages se modifient en haut du script. La configuration actuelle utilise 
 4. **Tous les cinq ans.** On calcule les médianes après les règles de l'année et on les échange entre voisins distants. On traite les conflits dans l'ordre d'origine des ponts. L'écart est mesuré par rapport à la médiane la plus haute. À partir de 5 % d'écart, l'île riche lance quatre dés et l'autre deux. L'île riche doit obtenir un meilleur lancer strictement supérieur pour fermer le pont. Les deux extrémités mettent leurs listes à jour, puis chaque rang enlève les ghosts devenus inutiles.
 5. **Tous les dix ans.** Après les conflits de ponts, les rangs calculent le Gini, le revenu moyen et l'âge moyen de chaque île sur l'état de fin d'année. Ils normalisent les trois valeurs à l'échelle mondiale et font converger un K-means distribué. Les groupes sont classés par Gini décroissant et les catégories 1, 2 et 3 ajustent l'inflation de −0,5, 0 et +0,5 point. Le nouveau taux sert aux indexations suivantes.
 6. **Fin.** Les rangs ferment `LOGS/resKmeans` et mesurent leur temps écoulé. Le root affiche le maximum et l'ajoute à `LOGS/STATS.TXT`. Chaque rang libère ses données avant `MPI_Finalize`.
+
+### Architecture MPI
+
+```mermaid
+flowchart TD
+    A["Le root lit le monde"] --> B["Partitionner en round robin et distribuer les îles et ponts"]
+    B --> C["Chaque rang crée son monde local, ses voisins et ses ghosts"]
+    C --> D["Écrire la répartition initiale et ouvrir resKmeans"]
+    D --> E{"Reste-t-il une année ?"}
+    E -->|Oui| F["Vieillissement, premiers revenus et Gini locaux"]
+    F --> G["Échanger les Gini et mettre à jour les ghosts"]
+    G --> H["Indexation, naissances et décès, hausse liée aux voisins"]
+    H --> I{"Année multiple de 5 ?"}
+    I -->|Oui| J["Échanger les médianes, régler les conflits, retirer les ponts et ghosts inutiles"]
+    I -->|Non| K{"Année multiple de 10 ?"}
+    J --> K
+    K -->|Oui| L["K-means distribué avec réductions globales et calculs locaux"]
+    L --> M["Ajuster l'inflation et écrire les catégories dans resKmeans"]
+    M --> E
+    K -->|Non| E
+    E -->|Non| N["Fermer resKmeans, réduire les temps au maximum et enregistrer la mesure"]
+    N --> O["Chaque rang libère ses données et termine MPI"]
+```
+
+| Primitives MPI | Rôle dans le programme |
+| --- | --- |
+| `MPI_Init`, `MPI_Comm_rank`, `MPI_Comm_size`, `MPI_Finalize` | Démarrer et terminer MPI, identifier le rang et connaître le nombre de processus. |
+| `MPI_Bcast` | Diffuser la graine globale depuis le root, puis les coordonnées de chaque centre initial depuis son rang propriétaire. |
+| `MPI_Scatter`, `MPI_Scatterv` | Distribuer d'abord les tailles en octets, puis les blocs de descriptions et de ponts. |
+| `MPI_Irecv`, `MPI_Isend`, `MPI_Waitall` | Échanger les Gini ou les médianes avec les rangs voisins, puis attendre la fin des communications avant de lire les tampons. |
+| `MPI_Sendrecv` | Échanger les meilleurs lancers aux deux extrémités d'un pont distant en conflit. |
+| `MPI_Allreduce` | Partager les totaux de normalisation et de K-means avec `MPI_SUM` et identifier les centres initiaux avec `MPI_MINLOC`. |
+| `MPI_File_open`, `MPI_File_set_size`, `MPI_File_write_ordered`, `MPI_File_close` | Créer ou vider les fichiers MPI-IO et y écrire collectivement la répartition initiale et les catégories, dans l'ordre des rangs. |
+| `MPI_Barrier`, `MPI_Reduce` | Synchroniser le départ du chrono, puis transmettre au root le maximum des durées avec `MPI_MAX`. |
+| `MPI_Error_string`, `MPI_Abort` | Afficher un diagnostic MPI-IO et interrompre le programme en cas d'erreur fatale. |
 
 ## Catalogue des fonctions
 
@@ -86,7 +117,7 @@ Les réglages se modifient en haut du script. La configuration actuelle utilise 
 | `creer_ile(num, nom, nb_hab, inflation, generateur)` | `src/ile.cpp` | Alloue l'île et appelle `creation_habitant` pour remplir sa population. |
 | `creation_habitant` | `src/habitant.cpp` | Crée le nom, tire l'âge et initialise le revenu d'un habitant. En MPI, le revenu des mineurs démarre à zéro. |
 | `ecrire_repartition` | `src/mainPara.cpp` | Écrit les effectifs et le monde local de chaque rang juste après la répartition. |
-| `ajouter_statistique` | `src/mainPara.cpp` | Ajoute le chemin du monde, le nombre de processus et le temps écoulé au fichier des mesures. |
+| `ajouter_statistique` | `src/mainPara.cpp` | Appelée par le root pour ajouter une mesure à `LOGS/STATS.TXT`. |
 | `liberer_ile` | `src/ile.cpp` | Libère les habitants avec `liberer_habitant`, puis leur tableau et l'île. |
 | `liberer_habitant` | `src/habitant.cpp` | Libère un habitant. |
 
@@ -96,7 +127,7 @@ Les réglages se modifient en haut du script. La configuration actuelle utilise 
 | --- | --- | --- |
 | `vieillir_tout_le_monde` | `src/fonction_simulation.cpp` | Augmente les âges et renvoie le tableau temporaire des nouveaux majeurs. |
 | `donner_premier_revenu` | `src/fonction_simulation.cpp` | Tire le premier revenu de chaque nouveau majeur avec le générateur de son île. |
-| `calculer_gini` | `src/fonction_simulation.cpp` | Calcule le Gini d'une île en parcourant les couples de revenus en O(n²). Sert aussi à l'enquête des dix ans. |
+| `calculer_gini` | `src/fonction_simulation.cpp` | Calcule le Gini d'une île à partir des écarts entre ses revenus. Sert aussi à l'enquête des dix ans. |
 | `calculer_gini_locaux` | `src/mainPara.cpp` | Met à jour les Gini des îles locales et produit un tableau à deux cases par île. |
 | `remplir_ghosts` | `src/mainPara.cpp` | Envoie le numéro et la valeur de chaque île concernée une fois par rang voisin. Le tag MPI indique si la valeur reçue est un Gini ou une médiane. |
 | `indexer_revenus` | `src/fonction_simulation.cpp` | Applique le taux d'inflation de l'île aux revenus des majeurs. |
@@ -109,14 +140,14 @@ Les réglages se modifient en haut du script. La configuration actuelle utilise 
 | `lancer_de` | `src/fonction_simulation.cpp` | Tire un entier de 1 à 6 avec le générateur de l'île. |
 | `retirer_pont` | `src/fonction_simulation.cpp` | Enlève une liaison dans chaque liste locale disponible. |
 | `retirer_voisin` | `src/fonction_simulation.cpp` | Retire une entrée et décale les suivantes dans une liste. |
-| `retirer_ghosts_sans_pont` | `src/mainPara.cpp` | Garde les ghosts encore utilisés par une île locale et recalcule leurs indices. |
+| `retirer_ghosts_sans_pont` | `src/mainPara.cpp` | Compacte les ghosts encore utilisés par une île locale et met à jour l'index par numéro. |
 
 ### Enquête et résultats K-means
 
 | Fonction | Fichier | Rôle |
 | --- | --- | --- |
 | `calculer_caracteristiques_locales` | `src/mainPara.cpp` | Prépare un tableau à trois cases par île avec le Gini, le revenu moyen et l'âge moyen. |
-| `normaliser_caracteristiques` | `src/mainPara.cpp` | Échange les totaux globaux avec `MPI_Allreduce`, puis centre et réduit les valeurs sur chaque rang. |
+| `normaliser_caracteristiques` | `src/mainPara.cpp` | Centre et réduit les valeurs à partir des sommes et des sommes de carrés globales. Une variance calculée non positive donne une colonne à zéro. |
 | `initialiser_centres` | `src/mainPara.cpp` | Sélectionne les îles aux plus petits numéros avec `MPI_MINLOC` et diffuse leurs coordonnées. |
 | `affecter_groupes_kmeans` | `src/mainPara.cpp` | Affecte les îles au centre le plus proche et partage les sommes par groupe. Arrête les itérations quand les affectations se stabilisent. Un groupe vide garde son centre précédent. |
 | `appliquer_categories_kmeans` | `src/mainPara.cpp` | Classe les centres par Gini décroissant, transforme les numéros de groupe en catégories et ajuste l'inflation. |
@@ -137,16 +168,67 @@ Les réglages se modifient en haut du script. La configuration actuelle utilise 
 
 La version d'origine dans [`Sequentiel/`](../Sequentiel/) regroupe les mêmes opérations de démonstration dans `monde.cpp` avec `generation`, `creation_habitant`, `affichage_monde`, `affichage_ile`, `affichage_habitant` et `liberer_monde`. Son `main.cpp` enchaîne lecture, affichage et libération.
 
-## Fichier à lire pour les statistiques
+## Complexité algorithmique
 
-`LOGS/resKmeans` est un CSV à trois colonnes, `annee,ile,categorie`. Il contient une ligne par île pour les années 10, 20, 30, etc. Les lignes d'une enquête sont écrites dans l'ordre des rangs. Pour comparer deux exécutions avec des nombres de rangs différents, utiliser le couple `(annee, ile)` comme identifiant.
+On note `P` le nombre de rangs, `N` le nombre d'îles et `E` le nombre de ponts actifs. Pour le rang `r`, `N_r` est son nombre d'îles, `E_r` son nombre de ponts locaux ou incidents et `A_r` le nombre d'entrées dans ses listes de voisins. Un pont entre deux rangs figure dans les deux tableaux de ponts. Ainsi, la somme des `E_r` est au plus `2E` et celle des `A_r` aussi. `G_r` désigne le nombre de ghosts distincts et `V_r` le nombre de rangs voisins.
 
-Chaque lancement recrée le contenu du fichier, y compris pour une simulation de moins de dix ans où seul l'en-tête est écrit.
+Pour une île `i` de `h_i` habitants, on utilise `H_r = Σ h_i`, `Q_r = Σ h_i²` et `M_r = Σ h_i log(h_i + 1)`, avec des sommes sur les îles du rang. Les quantités `H`, `Q` et `M` sont les sommes sur tous les rangs. Le round robin équilibre le nombre d'îles à une unité près. Des populations différentes peuvent produire des charges `H_r` et `Q_r` inégales.
 
-## Temps d'exécution et logs
+Les accès aux tables de hachage sont supposés en temps constant en moyenne. Le travail global cumule les opérations locales. Le temps écoulé dépend aussi de la répartition de ce travail, des communications et des entrées-sorties.
 
-Le programme réécrit `LOGS/LOGS.TXT` une seule fois par lancement, après la répartition. Le fichier contient un bloc par rang, avec le nombre d'îles, le nombre d'habitants et l'état initial de son monde local.
+| Opération | Travail local par rang | Travail global | Mémoire supplémentaire |
+| --- | --- | --- | --- |
+| Gini | Pour une île, O(h_i²) avec les deux boucles. O(h_i) si la somme des revenus est nulle. Au plus O(N_r + Q_r) pour le rang. | O(N + Q) par passage sur toutes les îles. | O(1) par appel à `calculer_gini`, plus O(N_r) pour le tableau des valeurs du rang. |
+| Médiane | O(N_r + M_r) par échéance de cinq ans, sous l'hypothèse d'un `qsort` en O(h_i log h_i). | O(N + M) par échéance. | O(h_i) pour la copie des revenus. Une seule copie d'île est traitée à la fois sur chaque rang, hors espace interne de `qsort`. |
+| Règles annuelles ordinaires | O(N_r + H_r + Q_r + A_r) au pire pour le vieillissement, les revenus, les décès, le Gini et la recherche d'une voisine plus inégalitaire. | O(N + H + Q + E) par année, hors échange des Gini et échéances de cinq et dix ans. | O(N_r + max h_i) sur le rang pour les valeurs des îles et le tableau temporaire des nouveaux majeurs. |
+| Partitionnement round robin | O(1) pour `rang_round_robin` par île. Le root lit et prépare tous les blocs en O(N + E + P). Chaque rang crée ensuite ses îles et habitants en O(N_r + H_r). | O(N + E + P + H) au démarrage, hors coût des collectives. | O(N + E + P) pour la préparation sur le root, puis O(N_r + H_r + E_r) pour le monde du rang et ses listes et tampons à la réception. |
+| Ponts et ghosts | Construire les listes et les ghosts coûte O(N_r + E_r). Un échange avec des ghosts coûte au pire O(P + G_r + V_r × (N_r + A_r)) pour préparer et lire les messages. Sans ghost, la fonction revient en O(1). | O(N + E) pour la construction, puis la somme des coûts locaux pour chaque échange. | O(P + E_r + G_r) pour les tampons et requêtes d'un échange. Les tableaux de ponts et de ghosts gardent leur capacité initiale après compactage. |
+| Fermetures de ponts | O(E_r + C_r × Δ_r), où `C_r` est le nombre de ponts fermés sur le rang et `Δ_r` le degré maximal d'une île locale. Retirer un lien peut nécessiter une recherche puis un décalage. Après une fermeture, le nettoyage des ghosts coûte O(N_r + A_r + G_r). | Somme des coûts locaux. Chaque pont distant en conflit déclenche un échange d'un entier par extrémité. | O(G_r) pour marquer les ghosts à conserver. Les ponts et les listes sont compactés sur place. |
+| K-means distribué | Préparer les caractéristiques coûte O(N_r + H_r + Q_r), puis les normaliser coûte O(N_r × d). Pour `k` centres et `d` caractéristiques, l'initialisation coûte O(k × (N_r + d)), les `T` itérations coûtent O(T × (N_r × k × d + k × d)) et le classement coûte O(k² + N_r). | O(N + H + Q) pour les caractéristiques, O(N × d) pour la normalisation et O(k × (N + P × d)) pour l'initialisation. Les itérations coûtent O(T × (N × k × d + P × k × d)), puis le classement O(P × k² + N). | O(N_r × d + N_r + k × d) pour les caractéristiques, les affectations et les centres, hors tampon d'écriture. |
 
-La ligne `Simulation parallèle (s)` donne le temps écoulé du rang le plus lent. La mesure va de la lecture du monde à la fermeture de `LOGS/resKmeans`, avec le temps passé à écrire `LOGS.TXT` soustrait.
+Pour les ghosts, le rang parcourt ses listes pour chaque rang voisin et envoie un message groupé par destination. Chaque couple île locale–rang destinataire est envoyé une seule fois, sous la forme de deux `double`.
 
-Le root ajoute une ligne à `LOGS/STATS.TXT` à la fin de chaque lancement. Les trois colonnes sont séparées par des tabulations, dans cet ordre : chemin du monde passé en argument, nombre de processus, durée en secondes.
+Pour K-means, `d = 3` et `k ≤ 3`. La normalisation fait un `MPI_Allreduce` de 7 `double`. Chaque centre initial demande une réduction `MPI_MINLOC` et une diffusion. Chaque itération fait un `MPI_Allreduce` de 13 `double`, quelle que soit la quantité d'îles du rang. `T` dépend de la stabilisation des affectations. Les coûts des collectives dépendent de l'implémentation MPI et du placement des rangs.
+
+## Fichiers de sortie
+
+| Fichier | Contenu | Écriture |
+| --- | --- | --- |
+| `LOGS/STATS.TXT` | Trois champs séparés par des tabulations, sans en-tête. Le chemin du monde, le nombre de processus et le temps en secondes. Le nombre d'années est absent. | Le root ajoute une ligne par simulation terminée. |
+| `LOGS/resultat.txt` | Tableau avec en-tête et quatre champs séparés par `\|`. Le monde, le nombre de processus, le temps en secondes et `Nb itérations`, qui correspond à `ANNEES`. | Le script ajoute un bloc par benchmark et termine le bloc par `==================` si tous les lancements aboutissent. |
+| `LOGS/LOGS.TXT` | Un bloc par rang avec ses îles, ses effectifs et l'état du monde juste après la répartition. | Réécrit une fois par lancement. |
+| `LOGS/resKmeans` | CSV `annee,ile,categorie`, avec une ligne par île pour chaque enquête des années 10, 20, 30, etc. | Vidé au début de chaque simulation, puis alimenté par blocs ordonnés par rang à chaque enquête. Seul l'en-tête est écrit avant la première enquête. |
+
+## Mesure des performances
+
+1. Chaque rang relève `start` avec `std::chrono::system_clock` juste après la barrière de départ, après `MPI_Init` et la validation des arguments, avant que le root lise le monde.
+2. Le temps inclut la lecture, le partitionnement, la distribution, la construction des mondes locaux, la simulation et ses communications. Il inclut aussi l'ouverture, les écritures et la fermeture de `LOGS/resKmeans`. Chaque rang soustrait le temps passé dans `ecrire_repartition`, qui couvre la préparation du texte et l'écriture collective de `LOGS/LOGS.TXT`.
+3. Chaque rang relève `end` juste après la fermeture de `LOGS/resKmeans` et calcule sa durée locale en secondes avec `end - start - duree_logs`. Le root reçoit le maximum de ces durées via `MPI_Reduce` avec `MPI_MAX`, l'affiche et l'ajoute à `LOGS/STATS.TXT`.
+
+La compilation, le lancement de `mpirun`, l'initialisation MPI, la barrière de départ, la réduction finale des temps, l'écriture dans `STATS.TXT` et `resultat.txt`, la libération finale des données et `MPI_Finalize` sont hors mesure. Le script compile avec `mpic++ -O3 -std=c++11`, en utilisant les en-têtes de `parallel/include` et du round robin.
+
+Le résultat est le maximum des durées locales après soustraction du log sur chaque rang. Il diffère du temps mural complet d'un lancement, en particulier si les rangs attendent pendant l'écriture du log. `system_clock` peut être ajustée pendant la mesure. Les temps peuvent aussi varier avec le placement des rangs, la charge de la machine et les performances du système de fichiers.
+
+### Machine de développement
+
+La machine utilise un Intel Core i5-13420H à architecture hybride, avec 4 cœurs Performance (P-cores), 4 cœurs Efficient (E-cores), 8 cœurs physiques et 12 processeurs logiques. `lscpu` indique 12 Mio de cache L3. [Fiche Intel](https://www.intel.com/content/www/us/en/products/sku/232173/intel-core-i513420h-processor-12m-cache-up-to-4-60-ghz/specifications.html)
+
+Les premiers essais sur `balanced/extreme` pendant 10 ans donnent 30,74 s à 1 rang, 15,46 s à 2 rangs, 10,37 s à 3 rangs et 7,82 s à 4 rangs. L'accélération est presque linéaire jusqu'à 4 rangs. Le temps remonte à 12,46 s à 5 rangs. L'architecture hybride pourrait contribuer à cette dégradation si le placement introduit un rang plus lent. Pour vérifier cette hypothèse, il faut relever le placement effectif des rangs et répéter les mesures avec un placement contrôlé.
+
+Lors du dimensionnement des mondes, il restait environ 9 Gio de mémoire disponible. Sur `dense/extreme`, l'essai avec `-O2` et la graine 42 a pris environ 8,1 s pour 10 ans à 8 rangs. Le plus gros pic mémoire d'un rang était de 128 Mio et la somme des pics RSS individuels de 796 Mio. Les pics des rangs peuvent survenir à des instants différents. À 1 rang pour 1 an, le pic était de 611 Mio. Pour ce monde, `LOGS/LOGS.TXT` occupe environ 151 Mio.
+
+## Reproductibilité et validation
+
+Le root lit la graine fournie en argument ou utilise `std::time(nullptr)` si elle est omise. Il diffuse `seed_globale` à tous les rangs. Chaque île initialise son propre `std::mt19937` avec `seed_globale + num`, où `num` est son numéro. Le même générateur suit l'île pour la population initiale, les nouveaux revenus, les décès et les lancers de dés. À paramètres identiques, changer le nombre de processus conserve la graine initiale de chaque île. Les ponts sont parcourus dans l'ordre du fichier et les centres initiaux sont choisis par numéro d'île.
+
+Pour comparer deux exécutions, garder le même monde, le même nombre d'années, la même graine explicite et le même binaire. Conserver le CSV de chaque exécution, par exemple dans `run-1/LOGS/resKmeans` et `run-3/LOGS/resKmeans`. Vérifier l'en-tête et le nombre de lignes, puis comparer les catégories par couple `(annee, ile)`. Les rangs peuvent écrire les lignes dans un ordre différent.
+
+```bash
+diff -u \
+    <(tail -n +2 run-1/LOGS/resKmeans | sort -t, -k1,1n -k2,2n) \
+    <(tail -n +2 run-3/LOGS/resKmeans | sort -t, -k1,1n -k2,2n)
+```
+
+Avec `monde1.txt`, 10 ans et la graine 42, cette comparaison a donné les mêmes catégories à un et à trois rangs.
+
+Les sommes flottantes de la normalisation et de K-means peuvent être regroupées et additionnées dans un ordre différent quand le nombre de rangs change. Les arrondis peuvent alors modifier les centres ou une catégorie près d'une frontière, puis le taux d'inflation et l'évolution des années suivantes. La graine fixe contrôle les tirages, avec une reproductibilité numérique qui dépend aussi du compilateur et des bibliothèques utilisés. [Standard MPI sur les réductions](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node130.htm)
