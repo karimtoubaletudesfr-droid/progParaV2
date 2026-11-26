@@ -1,12 +1,16 @@
 #include <mpi.h>
 
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -23,8 +27,10 @@ const int ROOT_RANK_NOT_AVAILABLE = 2;
 const int NUMBER_OF_YEARS_TO_SIMULATE_IS_NOT_POSITIVE = 3;
 const int FILE_NOT_FOUND = 4;
 const int MEMORY_ALLOCATION_ERROR = 5;
+const int LOG_ERROR = 6;
 const int NB_CARACTERISTIQUES = 3;
 const int NB_GROUPES = 3;
+const char FICHIER_KMEANS[] = "LOGS/resKmeans";
 
 // Tags MPI utilisés dans remplir_ghosts pour distinguer les Gini des médianes.
 const int GINI_GHOST = 100;
@@ -504,12 +510,12 @@ void appliquer_categories_kmeans(const pseudoMonde* monde, int* groupes,
     }
 }
 
-void verifier_fichier_kmeans(int code, int rang) {
+void verifier_fichier_mpi(int code, int rang, const char* chemin = FICHIER_KMEANS) {
     if (code != MPI_SUCCESS) {
         char message[MPI_MAX_ERROR_STRING];
         int longueur;
         MPI_Error_string(code, message, &longueur);
-        std::cerr << "Erreur pour resKmeans sur le rang " << rang << " : "
+        std::cerr << "Erreur pour " << chemin << " sur le rang " << rang << " : "
                   << message << '\n';
         MPI_Abort(MPI_COMM_WORLD, code);
     }
@@ -534,9 +540,75 @@ void ecrire_resultats_kmeans(MPI_File fichier, int annee, const pseudoMonde* mon
     }
 
     // MPI écrit les lignes rang par rang au même emplacement partagé dans le fichier.
-    verifier_fichier_kmeans(MPI_File_write_ordered(fichier, lignes, longueur,
+    verifier_fichier_mpi(MPI_File_write_ordered(fichier, lignes, longueur,
                                MPI_CHAR, MPI_STATUS_IGNORE), rang);
     std::free(lignes);
+}
+
+void ecrire_repartition(const pseudoMonde* monde, const liste_voisins* listes,
+                        int rang) {
+    long long nb_habitants = 0;
+    // Additionner les populations des îles reçues par ce rang.
+    for (int i = 0; i < monde->nb_iles; ++i) {
+        nb_habitants += monde->liste_iles[i]->nb_hab;
+    }
+
+    std::ostringstream sortie;
+    sortie << "Rang : " << rang << '\n'
+           << "Îles locales : " << monde->nb_iles << '\n'
+           << "Habitants du rang : " << nb_habitants << '\n';
+
+    // Décrire les îles locales avant la première année de simulation.
+    for (int i = 0; i < monde->nb_iles; ++i) {
+        const ile* une_ile = monde->liste_iles[i];
+        sortie << "\nÎle " << une_ile->num << " (" << une_ile->nom << ")\n"
+               << "Inflation (%) : " << une_ile->inflation << '\n'
+               << "Voisins : " << listes[i].nombre << '\n';
+
+        // Indiquer le numéro et le rang de chaque île reliée au départ.
+        for (int j = 0; j < listes[i].nombre; ++j) {
+            const voisin& v = listes[i].voisins[j];
+            sortie << "  Île " << v.num << ", rang " << v.rang << '\n';
+        }
+
+        sortie << "Habitants : " << une_ile->nb_hab << '\n';
+        // Écrire l'âge et le revenu initiaux de chaque habitant.
+        for (int j = 0; j < une_ile->nb_hab; ++j) {
+            const habitant* h = une_ile->liste_hab[j];
+            sortie << "  " << h->nom << '\t' << h->age << " ans\t"
+                   << h->revenu << '\n';
+        }
+    }
+
+    sortie << '\n';
+    std::string texte = sortie.str();
+    if (texte.size() > INT_MAX) {
+        MPI_Abort(MPI_COMM_WORLD, LOG_ERROR);
+    }
+
+    // Chaque rang prépare un seul bloc. MPI écrit les blocs dans l'ordre des rangs.
+    const char chemin[] = "LOGS/LOGS.TXT";
+    MPI_File fichier;
+    verifier_fichier_mpi(MPI_File_open(MPI_COMM_WORLD, chemin,
+                            MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL,
+                            &fichier), rang, chemin);
+    verifier_fichier_mpi(MPI_File_set_size(fichier, 0), rang, chemin);
+    verifier_fichier_mpi(MPI_File_write_ordered(fichier, &texte[0], (int) texte.size(),
+                            MPI_CHAR, MPI_STATUS_IGNORE), rang, chemin);
+    verifier_fichier_mpi(MPI_File_close(&fichier), rang, chemin);
+}
+
+void ajouter_statistique(const char* monde, int nprocs, double temps) {
+    const char chemin[] = "LOGS/STATS.TXT";
+    // Garder les mesures précédentes et ajouter une ligne par lancement.
+    std::ofstream sortie(chemin, std::ios::app);
+    sortie << monde << '\t' << nprocs << '\t'
+           << std::setprecision(9) << temps << '\n';
+    sortie.close();
+    if (!sortie) {
+        std::cerr << "Impossible d'écrire dans " << chemin << '\n';
+        MPI_Abort(MPI_COMM_WORLD, LOG_ERROR);
+    }
 }
 
 int main(int argc, char** argv) {
@@ -570,6 +642,11 @@ int main(int argc, char** argv) {
         }
         MPI_Abort(MPI_COMM_WORLD, NUMBER_OF_YEARS_TO_SIMULATE_IS_NOT_POSITIVE);
     }
+
+    // Démarrer la mesure sur tous les rangs avant la lecture du monde.
+    MPI_Barrier(MPI_COMM_WORLD);
+    std::chrono::time_point<std::chrono::system_clock> start =
+        std::chrono::system_clock::now();
 
     unsigned int seed_globale;
     ilePortable* envoi = nullptr;
@@ -883,16 +960,20 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Écrire une seule fois la répartition et retirer cette opération du chrono.
+    const auto debut_logs = std::chrono::system_clock::now();
+    ecrire_repartition(&monde_local, listes, rank);
+    const auto duree_logs = std::chrono::system_clock::now() - debut_logs;
+
     MPI_File fichier_kmeans;
-    const char nom_resultats[] = "resKmeans";
-    verifier_fichier_kmeans(MPI_File_open(MPI_COMM_WORLD, nom_resultats,
+    verifier_fichier_mpi(MPI_File_open(MPI_COMM_WORLD, FICHIER_KMEANS,
                                MPI_MODE_CREATE | MPI_MODE_WRONLY,
                                MPI_INFO_NULL, &fichier_kmeans), rank);
     // Une nouvelle simulation repart d'un fichier vide et écrit un seul en-tête.
-    verifier_fichier_kmeans(MPI_File_set_size(fichier_kmeans, 0), rank);
+    verifier_fichier_mpi(MPI_File_set_size(fichier_kmeans, 0), rank);
     char entete[] = "annee,ile,categorie\n";
     int taille_entete = rank == root ? sizeof(entete) - 1 : 0;
-    verifier_fichier_kmeans(MPI_File_write_ordered(fichier_kmeans, entete,
+    verifier_fichier_mpi(MPI_File_write_ordered(fichier_kmeans, entete,
                                taille_entete, MPI_CHAR, MPI_STATUS_IGNORE), rank);
 
     for (int annee = 0; annee < annees; ++annee) {
@@ -992,7 +1073,22 @@ int main(int argc, char** argv) {
         }
     }
 
-    verifier_fichier_kmeans(MPI_File_close(&fichier_kmeans), rank);
+    verifier_fichier_mpi(MPI_File_close(&fichier_kmeans), rank);
+
+    // Le chrono couvre la répartition et la simulation, y compris la sortie K-means.
+    std::chrono::time_point<std::chrono::system_clock> end =
+        std::chrono::system_clock::now();
+    std::chrono::duration<double> elapsed_seconds = end - start - duree_logs;
+    double temps_local = elapsed_seconds.count();
+    double temps_global = 0.0;
+    MPI_Reduce(&temps_local, &temps_global, 1, MPI_DOUBLE, MPI_MAX, root,
+               MPI_COMM_WORLD);
+
+    if (rank == root) {
+        std::cout << "Simulation parallèle (s) :\t"
+                  << std::setprecision(9) << temps_global << std::endl;
+        ajouter_statistique(fichier, nprocs, temps_global);
+    }
 
     // Chaque rang libère les habitants, les îles puis ses structures de voisinage.
     for (int i = 0; i < monde_local.nb_iles; ++i) {
